@@ -1,0 +1,6 @@
+pygame
+pymunk
+numpy
+soundfile
+sounddevice
+librosa
