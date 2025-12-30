@@ -4,20 +4,44 @@ import librosa
 import math
 
 
+class CircularBuffer:
+    def __init__(self, chunkSize, numChunks):
+        self.chunkSize = chunkSize
+        self.numChunks = numChunks
+        self.buffer = np.zeros((numChunks, chunkSize))
+        self.index = 0
+        self.full = False
+    def add_chunk(self, chunk):
+        self.buffer[self.index] = chunk
+        self.index = (self.index + 1) % self.numChunks
+        if self.index == 0:
+            self.full = True
+    def getFlat(self):
+        # will be incorect until buffer is full
+        # Buffer is full; the 'oldest' chunk is at the current self.index
+        # Use np.roll to move the oldest data to the front, then flatten
+        return np.roll(self.buffer, -self.index, axis=0).flatten()
+    
 class LibrosaAudioAnalyzer:
     def __init__(self):
         # Configuration
         self.RATE = 44100
-        self.CHUNK = 1024 * 8  # Increased for better CQT resolution
+        self.CHUNK = 1024  # Increased for better CQT resolution
         self.sensitivity = -10 
         
+        self.recording = CircularBuffer(self.CHUNK, 10)
+
         # Define range: C2 to C7 (60 notes / 5 octaves)
         self.fmin = librosa.note_to_hz('C2')
         self.numOctives = 5
         self.n_bins = self.numOctives *12  # 12 notes per octave
         self.minNote = 'C2'
         self.maxNote = 'C7'
-        self.adjustRange(self.minNote, self.maxNote)        
+        
+        # sampling rate limits out highest note to be half the sampling rate (darn you Nyquist) (yes I'm ignoreing band pass stuff)
+        self.maxNoteAllowed =librosa.hz_to_note(self.RATE/2.2)
+        self.adjustRange('C2', 'C7')
+        #self.adjustRange('B4', 'C7')
 
         self.current_audio = np.zeros(self.CHUNK)
         self.stream = sd.InputStream(
@@ -33,9 +57,12 @@ class LibrosaAudioAnalyzer:
         Example: analyzer.adjustRange('C2', 'C6')
         """
         # 1. Convert note names to MIDI numbers to calculate range size
+        
         midi_min = librosa.note_to_midi(minNote)
         midi_max = librosa.note_to_midi(maxNote)
-        
+        midi_max = min(midi_max, librosa.note_to_midi(self.maxNoteAllowed))
+        self.minNote = minNote
+        self.maxNote = librosa.midi_to_note(midi_max)
         # 2. Update core range parameters
         self.fmin = librosa.note_to_hz(minNote)
         self.n_bins = int(midi_max - midi_min) + 1  # Total semi-tones in range
@@ -57,22 +84,24 @@ class LibrosaAudioAnalyzer:
 
     def _audio_callback(self, indata, frames, time, status):
         # sounddevice gives us a numpy array directly
+        self.recording.add_chunk(indata[:, 0])
         self.current_audio = indata[:, 0]
 
     def getStrongestNote(self):
-        pitches, magnitudes, index = self.getNoteIndex()
-        pitch = pitches.flatten()[index]
-        mag_db = librosa.amplitude_to_db(np.atleast_1d(magnitudes.flatten()[index]))[0]
-
+        
+        f0, voiced_flag, voiced_probs = self.getNoteIndexPyin()
+        
         # 3. Apply A-Weighting
-        if pitch > 0:
-            a_weight = librosa.A_weighting(pitch)
-            adjusted_mag = mag_db + a_weight
-            
-            if adjusted_mag > self.sensitivity:
+        if voiced_flag.any():
+            # Find the average pitch of voiced frames, ignoring NaNs
+            valid_pitches = f0[voiced_flag]
+            if len(valid_pitches) > 0:
+                actual_pitch = np.median(valid_pitches)
+
+                
                 # 4. Convert Frequency to Note Name
-                note_name = librosa.hz_to_note(pitch, unicode=False)
-                return f"{note_name} (Mag: {adjusted_mag:.2f} dB)"
+                note_name = librosa.hz_to_note(actual_pitch, unicode=False)
+                return f"{note_name} (Prob: {np.mean(voiced_probs[voiced_flag]):.2f})"
         
         return "No strong note"
 
@@ -92,12 +121,13 @@ class LibrosaAudioAnalyzer:
         """
         # 1. Compute CQT Magnitude (Frequency bins are musical notes)
         # We use a small hop_length to get a single frame of data
+        wav = self.recording.getFlat()
         cqt = np.abs(librosa.cqt(
-            self.current_audio, 
+            wav, 
             sr=self.RATE, 
             fmin=self.fmin, 
             n_bins=self.n_bins,
-            hop_length=self.CHUNK + 1 
+            hop_length=len(wav)+ 1 
         ))
         
         # Flatten to get the 1D magnitude array
@@ -125,12 +155,19 @@ class LibrosaAudioAnalyzer:
         noteShift: number of semitones to shift the spectrum
         rangeShift: number of notes to shift the range
         """
-        self.minNote = librosa.midi_to_note(librosa.note_to_midi(self.minNote)+noteShift)
-        self.maxNote = librosa.midi_to_note(librosa.note_to_midi(self.maxNote)+noteShift+rangeShift)
-        self.adjustRange(self.minNote, self.maxNote)       
+        minNote = librosa.midi_to_note(librosa.note_to_midi(self.minNote) + noteShift)
+        maxNote = librosa.midi_to_note(librosa.note_to_midi(self.maxNote) + noteShift+rangeShift)
+        self.adjustRange(minNote, maxNote)       
 
+
+    def getNoteIndexPyin(self):
+        f0, voiced_flag, voiced_probs = librosa.pyin(self.recording.getFlat(),
+                                             sr=self.RATE,
+                                             fmin=self.note_freqs[0], 
+                                             fmax=self.note_freqs[-1])
+        return f0, voiced_flag, voiced_probs
     
-    def getNoteIndex(self):
+    def getNoteIndex(self):       
         """
         Returns the index of the strongest note in the current spectrum.
         """
