@@ -8,7 +8,7 @@ class LibrosaAudioAnalyzer:
     def __init__(self):
         # Configuration
         self.RATE = 44100
-        self.CHUNK = 1024 * 8  # Increased for better CQT resolution
+        self.CHUNK = 1024   # Increased for better CQT resolution
         self.sensitivity = -10 
         
         # Define range: C2 to C7 (60 notes / 5 octaves)

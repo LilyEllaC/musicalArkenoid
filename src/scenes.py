@@ -20,3 +20,9 @@ class Scene(ABC):
     @abstractmethod
     def draw(self):
         pass
+
+    def textToScreen(self,words, font, colour, x, y):
+        text=font.render(words, True, colour)
+        textRect=text.get_rect()
+        textRect.center=(x, y)
+        self.screen.blit(text, textRect)

@@ -48,6 +48,8 @@ class Game:
 
         pygame.quit()
 
+        
+
 
 # main.py
 # Entry point for the game
